@@ -18,9 +18,12 @@
 ## Сборка
 
 ```bash
+sudo apt update && sudo apt install build-essential
+sudo pacman -S base-devel gcc
+g++ --version
 mkdir build
 cd build
-cmake ..
+cmake -DCMAKE_CXX_COMPILER=g++ ..
 make -j$(nproc)
 ```
 
