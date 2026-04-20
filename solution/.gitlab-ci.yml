@@ -13,14 +13,14 @@ build_freq:
   before_script:
     - apt-get update && apt-get install -y build-essential cmake
   script:
-    - cd context7
+    - cd solution
     - mkdir build
     - cd build
     - cmake ..
     - make -j$(nproc)
   artifacts:
     paths:
-      - context7/build/freq
+      - solution/build/freq
     expire_in: 1 hour
 
 test_freq:
@@ -29,7 +29,7 @@ test_freq:
   before_script:
     - apt-get update && apt-get install -y python3
   script:
-    - cd context7/tests
+    - cd solution/tests
     - python3 test_freq.py
   dependencies:
     - build_freq
@@ -40,7 +40,7 @@ docker_build:
   services:
     - docker:20.10.16-dind
   script:
-    - cd context7
+    - cd solution
     - docker build -t $DOCKER_IMAGE_NAME:$DOCKER_TAG .
     # - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
     # - docker push $DOCKER_IMAGE_NAME:$DOCKER_TAG
