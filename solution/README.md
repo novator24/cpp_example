@@ -18,8 +18,7 @@
 ## Сборка
 
 ```bash
-sudo apt update && sudo apt install build-essential
-sudo pacman -S base-devel gcc
+sudo apt update && sudo apt install -y build-essential
 g++ --version
 mkdir build
 cd build
