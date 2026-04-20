@@ -1,0 +1,46 @@
+stages:
+  - build
+  - test
+  - docker
+
+variables:
+  DOCKER_IMAGE_NAME: $CI_REGISTRY_IMAGE/freq
+  DOCKER_TAG: $CI_COMMIT_SHORT_SHA
+
+build_freq:
+  stage: build
+  image: debian:11
+  before_script:
+    - apt-get update && apt-get install -y build-essential cmake
+  script:
+    - cd context7
+    - mkdir build
+    - cd build
+    - cmake ..
+    - make -j$(nproc)
+  artifacts:
+    paths:
+      - context7/build/freq
+    expire_in: 1 hour
+
+test_freq:
+  stage: test
+  image: debian:11
+  before_script:
+    - apt-get update && apt-get install -y python3
+  script:
+    - cd context7/tests
+    - python3 test_freq.py
+  dependencies:
+    - build_freq
+
+docker_build:
+  stage: docker
+  image: docker:20.10.16
+  services:
+    - docker:20.10.16-dind
+  script:
+    - cd context7
+    - docker build -t $DOCKER_IMAGE_NAME:$DOCKER_TAG .
+    # - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    # - docker push $DOCKER_IMAGE_NAME:$DOCKER_TAG
