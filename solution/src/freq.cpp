@@ -33,9 +33,11 @@ struct HashMap {
 
     HashMap(uint32_t capacity_bits = 20) {
         table.resize(1 << capacity_bits);
+        madvise(table.data(), table.size() * sizeof(Slot), MADV_HUGEPAGE);
         mask = (1 << capacity_bits) - 1;
         size = 0;
         arena.reserve(1024 * 1024 * 16); // 16MB initial arena
+        madvise(arena.data(), arena.capacity(), MADV_HUGEPAGE);
     }
 
     void insert(const char* word, uint32_t len, uint64_t hash) {
@@ -91,6 +93,7 @@ struct HashMap {
 
     void resize() {
         std::vector<Slot> new_table(table.size() * 2);
+        madvise(new_table.data(), new_table.size() * sizeof(Slot), MADV_HUGEPAGE);
         uint32_t new_mask = new_table.size() - 1;
 
         for (const auto& slot : table) {
@@ -107,17 +110,16 @@ struct HashMap {
     }
 };
 
-bool is_alpha_table[256] = {false};
 char to_lower_table[256] = {0};
 
 void init_tables() {
     for (int i = 0; i < 256; ++i) {
         if (i >= 'a' && i <= 'z') {
-            is_alpha_table[i] = true;
             to_lower_table[i] = (char)i;
         } else if (i >= 'A' && i <= 'Z') {
-            is_alpha_table[i] = true;
             to_lower_table[i] = (char)(i + 32);
+        } else {
+            to_lower_table[i] = 0;
         }
     }
 }
@@ -129,8 +131,8 @@ void process_chunk(const char* data, size_t file_size, size_t start_offset, size
 
     // Adjust start: if we are in the middle of a word, skip it (the previous thread will handle it)
     if (start_offset > 0) {
-        if (is_alpha_table[(unsigned char)*(p - 1)]) {
-            while (p < file_end && is_alpha_table[(unsigned char)*p]) {
+        if (to_lower_table[(unsigned char)*(p - 1)]) {
+            while (p < file_end && to_lower_table[(unsigned char)*p]) {
                 p++;
             }
         }
@@ -139,8 +141,18 @@ void process_chunk(const char* data, size_t file_size, size_t start_offset, size
     char word_buf[4096];
     
     while (p < end) {
-        // Skip non-alpha
-        while (p < file_end && !is_alpha_table[(unsigned char)*p]) {
+        // Skip non-alpha using loop unrolling for speed (helps compiler auto-vectorize)
+        while (p + 8 <= file_end) {
+            if (to_lower_table[(unsigned char)p[0]] || to_lower_table[(unsigned char)p[1]] ||
+                to_lower_table[(unsigned char)p[2]] || to_lower_table[(unsigned char)p[3]] ||
+                to_lower_table[(unsigned char)p[4]] || to_lower_table[(unsigned char)p[5]] ||
+                to_lower_table[(unsigned char)p[6]] || to_lower_table[(unsigned char)p[7]]) {
+                break;
+            }
+            p += 8;
+        }
+        
+        while (p < file_end && !to_lower_table[(unsigned char)*p]) {
             p++;
         }
         
@@ -153,12 +165,15 @@ void process_chunk(const char* data, size_t file_size, size_t start_offset, size
         uint64_t hash = 14695981039346656037ULL;
         
         // Read word (can go beyond 'end' up to 'file_end' to finish the word)
-        while (p < file_end && is_alpha_table[(unsigned char)*p]) {
-            char c = to_lower_table[(unsigned char)*p];
-            if (len < sizeof(word_buf)) {
-                word_buf[len++] = c;
-                hash = (hash ^ (unsigned char)c) * 1099511628211ULL;
-            }
+        char c;
+        while (p < file_end && len < sizeof(word_buf) && (c = to_lower_table[(unsigned char)*p])) {
+            word_buf[len++] = c;
+            hash = (hash ^ (unsigned char)c) * 1099511628211ULL;
+            p++;
+        }
+        
+        // Skip remaining characters if word is too long
+        while (p < file_end && to_lower_table[(unsigned char)*p]) {
             p++;
         }
         
@@ -202,6 +217,7 @@ int main(int argc, char** argv) {
         close(fd);
         return 1;
     }
+    madvise((void*)data, sb.st_size, MADV_SEQUENTIAL);
 
     unsigned int num_threads = std::thread::hardware_concurrency();
     if (num_threads == 0) num_threads = 4;
@@ -227,15 +243,38 @@ int main(int argc, char** argv) {
         t.join();
     }
 
-    // Merge local maps into a global one
-    HashMap global_map;
-    for (auto& local_map : local_maps) {
-        for (const auto& slot : local_map.table) {
-            if (slot.count > 0) {
-                global_map.insert_or_add(&local_map.arena[slot.offset], slot.length, slot.hash, slot.count);
+    // Merge local maps into a global one using a Parallel Merge Tree
+    while (local_maps.size() > 1) {
+        std::vector<std::thread> merge_threads;
+        std::vector<HashMap> next_level;
+        
+        for (size_t i = 0; i < local_maps.size(); i += 2) {
+            if (i + 1 < local_maps.size()) {
+                // Move the first map into the next level
+                next_level.push_back(std::move(local_maps[i]));
+                HashMap& target = next_level.back();
+                HashMap& source = local_maps[i + 1];
+                
+                merge_threads.emplace_back([&target, &source]() {
+                    for (const auto& slot : source.table) {
+                        if (slot.count > 0) {
+                            target.insert_or_add(&source.arena[slot.offset], slot.length, slot.hash, slot.count);
+                        }
+                    }
+                });
+            } else {
+                next_level.push_back(std::move(local_maps[i]));
             }
         }
+        
+        for (auto& t : merge_threads) {
+            t.join();
+        }
+        
+        local_maps = std::move(next_level);
     }
+
+    HashMap& global_map = local_maps[0];
 
     munmap((void*)data, sb.st_size);
     close(fd);
